@@ -1,0 +1,6 @@
+/Debug
+*sdf
+*.sln
+*.vcxproj
+*.user
+*.pdb
