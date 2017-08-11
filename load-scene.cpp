@@ -17,16 +17,15 @@ randomFloat() {
 }
 
 static void
-makeCircleGrid(
-int startIndex,
-int circleCount,
-float circleRadius,
-float circleColor[3],
-float startOffsetX,
-float startOffsetY,
-float* position,
-float* color,
-float* radius)
+makeCircleGrid(	int startIndex,
+				int circleCount,
+				float circleRadius,
+				float circleColor[3],
+				float startOffsetX,
+				float startOffsetY,
+				float* position,
+				float* color,
+				float* radius)
 {
 
 	int index = startIndex;
@@ -48,12 +47,12 @@ float* radius)
 }
 
 static void
-generateRandomCircles(
-int numCircles,
-float* position,
-float* velocity,
-float* color,
-float* radius) {
+generateRandomCircles(	int numCircles,
+						float* position,
+						float* velocity,
+						float* color,
+						float* radius) 
+{
 
 	srand(0);
 	std::vector<float> depths(numCircles);
@@ -89,13 +88,13 @@ float* radius) {
 }
 
 static void
-generateSizeCircles(
-int numCircles,
-float* position,
-float* velocity,
-float* color,
-float* radius,
-float targetR) {
+generateSizeCircles(int numCircles,
+					float* position,
+					float* velocity,
+					float* color,
+					float* radius,
+					float targetR) 
+{
 
 	srand(0);
 	std::vector<float> depths(numCircles);
@@ -131,14 +130,13 @@ float targetR) {
 }
 
 static void
-changeCircles(
-int numCircles,
-float* position,
-float* radius,
-float targetR,
-float center,
-float div
-) {
+changeCircles(	int numCircles,
+				float* position,
+				float* radius,
+				float targetR,
+				float center,
+				float div) 
+{
 
 	for (int i = 0; i<numCircles; i++) {
 
@@ -152,13 +150,12 @@ float div
 }
 
 void
-loadCircleScene(
-SceneName sceneName,
-int& numCircles,
-float*& position,
-float*& velocity,
-float*& color,
-float*& radius)
+loadCircleScene(SceneName sceneName,
+				int& numCircles,
+				float*& position,
+				float*& velocity,
+				float*& color,
+				float*& radius)
 {
 
 	if (sceneName == SNOWFLAKES) {

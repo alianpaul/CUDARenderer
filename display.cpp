@@ -1,9 +1,10 @@
 #include "renderer.h"
 #include "image.h"
-//#include "cycle-timer.h"
 #include "console.h"
 
 #include <GLFW\glfw3.h>
+
+#include "perf.h"
 
 static struct {
 	int width;
@@ -24,7 +25,6 @@ void renderPicture();
 
 void startRendererWithDisplay(Renderer* renderer) 
 {
-
 	// setup the display
 
 	const Image* img = renderer->getImage();
@@ -38,7 +38,6 @@ void startRendererWithDisplay(Renderer* renderer)
 	gDisplay.height = img->height;
 
 	// configure GLUT
-
 	if (!glfwInit())
 	{
 		out_err("Counld not init GLFW");
@@ -64,8 +63,8 @@ void display()
 
 	const Image* img = gDisplay.renderer->getImage();
 
-	int width = std::min(img->width, gDisplay.width);
-	int height = std::min(img->height, gDisplay.height);
+	int width = gDisplay.width;
+	int height = gDisplay.height;
 
 	glDisable(GL_DEPTH_TEST);
 	glClearColor(0.f, 0.f, 0.f, 1.f);
@@ -93,14 +92,20 @@ void display()
 
 void renderPicture()
 {
+	QUERY_PERFORMANCE_ENTER;
 	gDisplay.renderer->clearImage();
+	QUERY_PERFORMANCE_EXIT(ClearImage);
 
-	// update particle positions and state
+	//update particle positions and state
+	QUERY_PERFORMANCE_ENTER;
 	if (gDisplay.updateSim) {
 		gDisplay.renderer->advanceAnimation();
 	}
 	if (gDisplay.pauseSim)
 		gDisplay.updateSim = false;
+	QUERY_PERFORMANCE_EXIT(Animate);
 
+	QUERY_PERFORMANCE_ENTER
 	gDisplay.renderer->render();
+	QUERY_PERFORMANCE_EXIT(Render);
 }
