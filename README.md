@@ -2,7 +2,7 @@
 This is a toy circle renderer based on CUDA. I programmed the rendering algorithm of this project. The circle data generation processes are copied from this [CMU project](https://github.com/cmu15418/assignment2/tree/master/render)<br>
 I use this project to sharp my CUDA programming knowledge and skill.<br>
 
-The CUDA circle rendering algorithm draw color into the pixel buffer residing in the global memory of the GPU. Then I use OpenGL api to draw the pixel buffer which moved back to CPU.<br> 
+I use a CUDA circle rendering algorithm to draw color into the pixel buffer residing in the global memory of the GPU. Then I use OpenGL api to draw the pixel buffer which moved back to CPU.<br> 
 
 ## Results
 <img src="https://github.com/alianpaul/CUDARenderer/blob/master/Results/100k.png" width="50%" height="50%"><img src="https://github.com/alianpaul/CUDARenderer/blob/master/Results/10k.png" width="50%" height="50%">
