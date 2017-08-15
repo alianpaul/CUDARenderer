@@ -11,8 +11,8 @@ int main(int argc, char** argv)
 	//SceneName scene = CIRCLE_TEST_10K;
 	//SceneName scene = CIRCLE_TEST_100K;
 	//SceneName scene = PATTERN;
-	SceneName scene = SNOWFLAKES_SINGLE_FRAME;
-	//SceneName scene = HYPNOSIS;
+	//SceneName scene = SNOWFLAKES_SINGLE_FRAME;
+	SceneName scene = HYPNOSIS;
 	//SceneName scene = FIREWORKS;
 	//SceneName scene = BOUNCING_BALLS;
 	//SceneName scene = BIG_LITTLE;
