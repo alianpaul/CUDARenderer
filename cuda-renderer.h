@@ -27,8 +27,19 @@ private:
 	float* cudaDeviceRadius;
 	float* cudaDeviceImageData;
 
+	unsigned int  m_binWidth;
+
+	/*Used by method 0
+	*/
 	unsigned int* m_devicePredicate;
 	unsigned int* m_deviceOffset;
+
+	/*Used by method 1
+	*/
+	unsigned int* m_devCirBinCnt;
+	unsigned int* m_devCirBinIdx;
+	int* m_devBinStart;
+	int* m_hstBinStart;
 
 public:
 

@@ -3,16 +3,22 @@
 #include <math.h>
 #include <stdio.h>
 #include <vector>
+#include <cfloat>
 
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <driver_functions.h>
+
+#include <thrust\sort.h>
+#include <thrust\device_ptr.h>
+#include <thrust\scan.h>
 
 #include "cuda-renderer.h"
 #include "image.h"
 #include "noise.h"
 #include "load-scene.h"
 #include "bin.h"
+#include "utility.h"
 #include "perf.h"
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -59,7 +65,7 @@ __constant__ float  cuConstColorRamp[COLOR_MAP_SIZE][3];
 #include "circle-box-test.cu_inl"
 
 
-void prefixSum(uint* input, uint* output, int cnt);
+unsigned int prefixSum(unsigned int* input, unsigned int* output, int cnt);
 
 // kernelClearImageSnowflake -- (CUDA device code)
 //
@@ -383,18 +389,55 @@ shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* imagePtr) {
 	// END SHOULD-BE-ATOMIC REGION
 }
 
+/***************Method 0************/
+
+__global__ void kernelFormPredicate(uint* predicate, float binMinX, float binMinY, float binLen)
+{
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if (idx >= cuConstRendererParams.numCircles)
+	{
+		return;
+	}
+
+	int idx3 = idx * 3;	//position 3 offset
+
+	float3	cen = *(float3*)(&cuConstRendererParams.position[idx3]);
+	float	rad = cuConstRendererParams.radius[idx];
+
+	float	invWidth = 1.f / cuConstRendererParams.imageWidth;
+
+	//compute compute
+	float	binL = binMinX;				//printf("L: %f", binL);
+	float	binB = binMinY;				//printf("B: %f", binB);
+	float	binR = binMinX + binLen;	//printf("R: %f", binR);
+	float	binT = binMinY + binLen;	//printf("T: %f\n", binT);
+
+	int isIn = circleInBoxConservative(cen.x, cen.y, rad, binL, binR, binT, binB);
+	//printf("%d\n", isIn);
+	if (isIn)
+	{
+
+		predicate[idx] = 1;
+	}
+	else
+	{
+		predicate[idx] = 0;
+	}
+}
+
 // kernelRenderCircles -- (CUDA device code)
 //
 // Each thread renders a circle.  Since there is no protection to
 // ensure order of update or mutual exclusion on the output image, the
 // resulting image will be incorrect.
-__global__ void kernelRenderCircles(unsigned int* devSegOffset,
-									float* devSegCen,
-									float* devSegCol,
-									float* devSegRad,
-									unsigned int numBinCirs,
-									unsigned int maxBinCirs,
-									unsigned int binWidth)
+__global__ void kernelRenderCircles_0(	unsigned int* devSegOffset,
+										float* devSegCen,
+										float* devSegCol,
+										float* devSegRad,
+										unsigned int numBinCirs,
+										unsigned int maxBinCirs,
+										unsigned int binWidth)
 {
 	extern __shared__ float sbuf[];
 	unsigned binPixelLen = cuConstRendererParams.imageHeight / binWidth;
@@ -438,7 +481,8 @@ __global__ void kernelRenderCircles(unsigned int* devSegOffset,
 	float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (py * cuConstRendererParams.imageWidth + px)]);
 	float4  color = *imgPtr;
 
-	//2. Loop through all the circles in the bin 
+	//2. Loop through all the circles in the bin
+	/**/
 	for (unsigned iCir = 0; iCir < cirCnt; ++iCir)		
 	{
 		float3 cen	= *(float3*)(&sCen[iCir * 3]);
@@ -453,8 +497,7 @@ __global__ void kernelRenderCircles(unsigned int* devSegOffset,
 
 		float3 rgb;
 		float  alpha;
-		/*Shading function, Copied from above
-		*/
+		//Shading function, Copied from above
 		if (cuConstRendererParams.sceneName == SNOWFLAKES || cuConstRendererParams.sceneName == SNOWFLAKES_SINGLE_FRAME) {
 
 			const float kCircleMaxAlpha = .5f;
@@ -482,42 +525,247 @@ __global__ void kernelRenderCircles(unsigned int* devSegOffset,
 
 	//3. write new color to the buffer
 	*imgPtr = color;
+	
 }
 
-__global__ void kernelFormPredicate(uint* predicate, float binMinX, float binMinY, float binLen)
-{
-	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+/***************Method 1************/
 
-	if (idx >= cuConstRendererParams.numCircles)
+/* devOutputCirBinCnt: the Output
+*  binWidth
+*/
+__global__ void kernelFormCirBinCnt(unsigned int* devOutputCirBinCnt, unsigned int binWidth)
+{
+	int cirIdx = blockDim.x * blockIdx.x + threadIdx.x;
+
+	if (cirIdx >= cuConstRendererParams.numCircles)
+	{
+		return;
+	}
+	int cirIdx3 = cirIdx * 3;
+
+	float3	cen = *(float3*)(&cuConstRendererParams.position[cirIdx3]);
+	float	rad = cuConstRendererParams.radius[cirIdx];
+
+	//Calculate the pixel index of the boundry
+	short imgWidth	= cuConstRendererParams.imageWidth;
+	short imgHeight = cuConstRendererParams.imageHeight;
+
+	short minX = static_cast<short>((cen.x - rad) * imgWidth );
+	short maxX = static_cast<short>((cen.x + rad) * imgWidth );
+	short minY = static_cast<short>((cen.y - rad) * imgHeight);
+	short maxY = static_cast<short>((cen.y + rad) * imgHeight);
+
+	minX = CLAMP(minX, 0, imgWidth - 1);
+	maxX = CLAMP(maxX, 0, imgWidth - 1);
+	minY = CLAMP(minY, 0, imgHeight - 1);
+	maxY = CLAMP(maxY, 0, imgHeight - 1);
+
+	short binPixelLen = imgWidth / binWidth;
+
+	short xbinStart		=  minX / binPixelLen;
+	short xbinEnd		= (maxX / binPixelLen) + 1;
+	short ybinStart		=  minY / binPixelLen;
+	short ybinEnd		= (maxY / binPixelLen) + 1;
+
+	//printf("cir %d, xs = %d, xe = %d, ys = %d, ye = %d\n", cirIdx, xbinStart, xbinEnd, ybinStart, ybinEnd);
+
+	devOutputCirBinCnt[cirIdx] = (xbinEnd - xbinStart) * (ybinEnd - ybinStart);
+}
+
+/* Same process as kernelFormCirBinCnt, But this time, we put each cir's idx and it's according bin idx
+* into it's slot in the BinCirPair.
+*/
+__global__ void kernelFormBinCirPair(	unsigned int* devOutputBinCirPairBin, unsigned int* devOutputBinCirPairCir, 
+										unsigned int* devInputCirBinIdx, 
+										unsigned int binWidth)
+{
+	int cirIdx = blockDim.x * blockIdx.x + threadIdx.x;
+
+	if (cirIdx >= cuConstRendererParams.numCircles)
+	{
+		return;
+	}
+	int cirIdx3 = cirIdx * 3;
+
+	float3	cen = *(float3*)(&cuConstRendererParams.position[cirIdx3]);
+	float	rad = cuConstRendererParams.radius[cirIdx];
+
+	//Calculate the pixel index of the boundry
+	short imgWidth  = cuConstRendererParams.imageWidth;
+	short imgHeight = cuConstRendererParams.imageHeight;
+
+	short minX = static_cast<short>((cen.x - rad) * imgWidth);
+	short maxX = static_cast<short>((cen.x + rad) * imgWidth);
+	short minY = static_cast<short>((cen.y - rad) * imgHeight);
+	short maxY = static_cast<short>((cen.y + rad) * imgHeight);
+
+	minX = CLAMP(minX, 0, imgWidth - 1);
+	maxX = CLAMP(maxX, 0, imgWidth - 1);
+	minY = CLAMP(minY, 0, imgHeight - 1);
+	maxY = CLAMP(maxY, 0, imgHeight - 1);
+
+	short binPixelLen = imgWidth / binWidth;
+
+	short xbinStart = minX / binPixelLen;
+	short xbinEnd	= (maxX / binPixelLen) + 1;
+	short ybinStart = minY / binPixelLen;
+	short ybinEnd	= (maxY / binPixelLen) + 1;
+
+	unsigned outPutPos = devInputCirBinIdx[cirIdx];
+	for (unsigned y = ybinStart; y < ybinEnd; ++y)
+	{
+		unsigned binOffset = y * binWidth;
+		for (unsigned x = xbinStart; x < xbinEnd; ++x)
+		{
+			unsigned binIdx = binOffset + x;
+			devOutputBinCirPairBin[outPutPos] = binIdx; 
+			devOutputBinCirPairCir[outPutPos] = cirIdx;
+			++outPutPos;
+		}
+	}
+}
+
+__global__ void kernelFormBinStart (	int* devOutputBinStart, unsigned int* devInputBinCirPairBin,
+										unsigned int  bcPairLen)
+{
+
+	__shared__ int cache[257]; //256 bcpair + the last bc pair in the previous block
+
+	int bcPairIdx = blockDim.x * blockIdx.x + threadIdx.x;
+
+	if (bcPairIdx >= bcPairLen)
 	{
 		return;
 	}
 
-	int idx3 = idx * 3;	//position 3 offset
+	cache[1 + threadIdx.x] = devInputBinCirPairBin[bcPairIdx];
 
-	float3	cen = *(float3*)(&cuConstRendererParams.position[idx3]);
-	float	rad = cuConstRendererParams.radius[idx];
-
-	float	invWidth = 1.f / cuConstRendererParams.imageWidth;
-
-	//compute compute
-	float	binL = binMinX;				//printf("L: %f", binL);
-	float	binB = binMinY;				//printf("B: %f", binB);
-	float	binR = binMinX + binLen;	//printf("R: %f", binR);
-	float	binT = binMinY + binLen;	//printf("T: %f\n", binT);
-
-	int isIn = circleInBoxConservative(cen.x, cen.y, rad, binL, binR, binT, binB);
-	//printf("%d\n", isIn);
-	if (isIn)
+	if ( threadIdx.x == 0 )
 	{
+		if ( bcPairIdx != 0 )
+		{
+			cache[0] = devInputBinCirPairBin[bcPairIdx - 1];
+		}
+		else
+		{
+			cache[0] = -1;
+		}
+	}
 
-		predicate[idx] = 1;
+	__syncthreads();
+
+	if (cache[1 + threadIdx.x] != cache[threadIdx.x])
+	{
+		//printf("b: %d, s: %d\n", cache[1 + threadIdx.x], bcPairIdx);
+		devOutputBinStart[cache[1 + threadIdx.x]] = bcPairIdx;
+	}
+}
+
+__global__ void kernelRenderCircles_1 (	unsigned int* devInputBinCirPairCir, int* devInputBinStart,
+										unsigned int binWidth,
+										unsigned int bcPairLen,
+										unsigned int maxCirCnt)
+{
+	//extern __shared__ uint cacheCir[];
+	extern __shared__ float sbuf[];
+	float* sCen = &sbuf[0];
+	float* sRad = sCen + maxCirCnt * 3;
+	//float* sCol = sRad + maxCirCnt;
+
+	short binPixelLen = cuConstRendererParams.imageWidth / binWidth;
+
+	short px = blockDim.x * blockIdx.x + threadIdx.x;
+	short py = blockDim.y * blockIdx.y + threadIdx.y;
+	
+	short bx = px / binPixelLen;
+	short by = py / binPixelLen;
+	short bi = by * binWidth + bx;
+
+	int binStart	= devInputBinStart[bi];
+	int binEnd;
+	if (bi < binWidth * binWidth - 1)
+	{
+		binEnd = devInputBinStart[bi + 1];
 	}
 	else
 	{
-		predicate[idx] = 0;
+		binEnd = bcPairLen;
 	}
+
+
+	short tCntInBlock	= blockDim.x * blockDim.y;
+	int binSize			= binEnd - binStart;
+
+	short threadID = threadIdx.y * blockDim.x + threadIdx.x;
+
+	//move rad to shared
+	for ( size_t i = threadID; i < binSize; i += tCntInBlock )
+	{
+		unsigned int cirIdx = devInputBinCirPairCir[binStart + i];
+					sRad[i]		 = cuConstRendererParams.radius[cirIdx];
+		*(float3*)(&sCen[i * 3]) = *(float3*)(&cuConstRendererParams.position[cirIdx * 3]);
+		//*(float3*)(&sCol[i * 3]) = *(float3*)(&cuConstRendererParams.color[cirIdx * 3]);
+	}
+
+	__syncthreads();
+	
+	//Test if the pixel is in the circle.
+	float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (py * cuConstRendererParams.imageWidth + px)]);
+	float4  color = *imgPtr;
+	float invW = 1.f / cuConstRendererParams.imageWidth;
+	float invH = 1.f / cuConstRendererParams.imageHeight;
+	
+	for (size_t i = 0; i < binSize; ++i)
+	{
+		//unsigned int iCir = cacheCir[i];
+		//float3 cen = *(float3*)(&cuConstRendererParams.position[iCir * 3]);
+		//float  rad = cuConstRendererParams.radius[iCir];
+		float3 cen = *(float3*)(&sCen[i * 3]);
+		float  rad = sRad[i];
+		float2 pcen = make_float2(((float)px + 0.5) * invW, ((float)py + 0.5) * invH); //normalized pixel position
+
+		float  diffx	= pcen.x - cen.x;
+		float  diffy	= pcen.y - cen.y;
+		float  pcDist	= diffx * diffx + diffy * diffy;
+
+		if (pcDist > rad * rad) continue;
+
+		float3 rgb;
+		float  alpha;
+
+		//Shading function, Copied from above
+		if (cuConstRendererParams.sceneName == SNOWFLAKES || cuConstRendererParams.sceneName == SNOWFLAKES_SINGLE_FRAME) {
+
+			const float kCircleMaxAlpha = .5f;
+			const float falloffScale = 4.f;
+
+			float normPixelDist = sqrt(pcDist) / rad;
+			rgb = lookupColor(normPixelDist);
+
+			float maxAlpha = .6f + .4f * (1.f - cen.z);
+			maxAlpha = kCircleMaxAlpha * fmaxf(fminf(maxAlpha, 1.f), 0.f); // kCircleMaxAlpha * clamped value
+			alpha = maxAlpha * exp(-1.f * falloffScale * normPixelDist * normPixelDist);
+		}
+		else {
+			// simple: each circle has an assigned color
+			unsigned int iCir = devInputBinCirPairCir[binStart + i];
+			rgb = *(float3*)(&cuConstRendererParams.color[iCir * 3]);
+
+			//rgb = *(float3*)(&sCol[i * 3]);
+			alpha = .5f;
+		}
+
+		float oneMinusAlpha = 1.f - alpha;
+		//draw into to the pixel shared buffer
+		color.x = alpha*rgb.x + oneMinusAlpha * color.x;
+		color.y = alpha*rgb.y + oneMinusAlpha * color.y;
+		color.z = alpha*rgb.z + oneMinusAlpha * color.z;
+		color.w = alpha + color.w;
+	}
+
+	*imgPtr = color;
 }
+
 
 ////////////////////////////////////////////////////////////////////////////////////////
 
@@ -558,8 +806,16 @@ CudaRenderer::~CudaRenderer() {
 		cudaFree(cudaDeviceRadius);
 		cudaFree(cudaDeviceImageData);
 
+		/*method 0*/
 		cudaFree(m_devicePredicate);
 		cudaFree(m_deviceOffset);
+
+		/*method 1*/
+		cudaFree(m_devCirBinCnt);
+		cudaFree(m_devCirBinIdx);
+		cudaFree(m_devBinStart);
+
+		delete[] m_hstBinStart;
 	}
 }
 
@@ -633,10 +889,37 @@ CudaRenderer::setup() {
 	cudaMalloc(&cudaDeviceRadius,	sizeof(float) * numCircles);
 	cudaMalloc(&cudaDeviceImageData, sizeof(float) * 4 * image->width * image->height);
 
+	//used by all method
+	//m_binWidth = 16;
+	if (numCircles < 100)
+	{
+		m_binWidth = 4;
+	}
+	else if (numCircles >= 100 && numCircles < 1000)
+	{
+		m_binWidth = 8;
+	}
+	else if (numCircles >= 1000 && numCircles < 10000)
+	{
+		m_binWidth = 16;
+	}
+	else
+	{
+		m_binWidth = 64;
+	}
+	
+
+	/*Used by method 0*/
 	//Used to form each bin
 	cudaMalloc(&m_devicePredicate, sizeof(unsigned int) * numCircles);
 	//Used to form each bin
 	cudaMalloc(&m_deviceOffset, sizeof(unsigned int) * numCircles);
+
+	/*Used by method 1*/
+	cudaMalloc(&m_devCirBinCnt, sizeof(unsigned int) * numCircles);
+	cudaMalloc(&m_devCirBinIdx, sizeof(unsigned int) * numCircles);
+	cudaMalloc(&m_devBinStart,  sizeof(int) * m_binWidth * m_binWidth);
+	m_hstBinStart = new int[m_binWidth * m_binWidth];
 
 	cudaMemcpy(cudaDevicePosition, position, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice);
 	cudaMemcpy(cudaDeviceVelocity, velocity, sizeof(float) * 3 * numCircles, cudaMemcpyHostToDevice);
@@ -751,68 +1034,97 @@ CudaRenderer::advanceAnimation() {
 void
 CudaRenderer::render() 
 {
-
-	/*1.Initialize the bins.
+	
+	/*1. Form circle bin cnt
+	* 1 circle per thread
 	*/
-	unsigned	binWidth	= 8;
-	float		binLen		= 1.f / binWidth;
-	Bins bins(binWidth);
+	dim3 cirBlockDim(256);
+	dim3 cirGridDim( (numCircles + cirBlockDim.x - 1) / cirBlockDim.x );
+	kernelFormCirBinCnt <<< cirGridDim, cirBlockDim >>>(	m_devCirBinCnt, 
+															m_binWidth);
 
-	dim3 blockDim(256, 1);
-	dim3 gridDim( (numCircles + blockDim.x - 1) / blockDim.x );
+	/*2. Calculate each circles offset
+	*/
+	thrust::exclusive_scan( thrust::device_ptr<unsigned int>(m_devCirBinCnt),
+							thrust::device_ptr<unsigned int>(m_devCirBinCnt + numCircles),
+							thrust::device_ptr<unsigned int>(m_devCirBinIdx));
 
-	for (size_t iy = 0; iy < binWidth; ++iy)
+	unsigned int lastCirBinCnt; cudaMemcpy(&lastCirBinCnt, (m_devCirBinCnt + numCircles - 1), sizeof(unsigned int), cudaMemcpyDeviceToHost);
+	unsigned int lastCirBinIdx; cudaMemcpy(&lastCirBinIdx, (m_devCirBinIdx + numCircles - 1), sizeof(unsigned int), cudaMemcpyDeviceToHost);
+	unsigned int bcPairLen = lastCirBinCnt + lastCirBinIdx;
+
+	/*3. Form the binIdx-CirIdx pair
+	*/
+	unsigned int *devBinCirPairBin; //Attention: release manunally.
+	cudaMalloc(&devBinCirPairBin, sizeof(unsigned int) * bcPairLen);
+	unsigned int *devBinCirPairCir;
+	cudaMalloc(&devBinCirPairCir, sizeof(unsigned int) * bcPairLen);
+
+	kernelFormBinCirPair <<< cirGridDim, cirBlockDim >>>(	devBinCirPairBin, 
+															devBinCirPairCir, 
+															m_devCirBinIdx, 
+															m_binWidth);
+
+	/*4. Sort the binIdx-CirIdx pair by bin idx*/
+	thrust::stable_sort_by_key(	thrust::device_ptr<unsigned int>(devBinCirPairBin), 
+								thrust::device_ptr<unsigned int>(devBinCirPairBin + bcPairLen),
+								thrust::device_ptr<unsigned int>(devBinCirPairCir));
+
+	/*5. Find the start idx of each bin
+	*/
+	dim3 bcPairBlockDim(256);
+	dim3 bcPairGridDim( (bcPairLen + bcPairBlockDim.x - 1) / bcPairBlockDim.x);
+	cudaMemset(m_devBinStart, -1, sizeof(int) * m_binWidth * m_binWidth);
+
+
+	kernelFormBinStart <<< bcPairGridDim, bcPairBlockDim >>>(	m_devBinStart, 
+																devBinCirPairBin, 
+																bcPairLen);
+
+	//host side to adjust the start bin
+	cudaMemcpy(m_hstBinStart, m_devBinStart, sizeof(unsigned int) * m_binWidth * m_binWidth, cudaMemcpyDeviceToHost);
+	unsigned int end			= bcPairLen;
+	unsigned int maxBinCirCnt	= 0;
+	for (int i = m_binWidth * m_binWidth - 1; i >= 0; --i)
 	{
-		for (size_t ix = 0; ix < binWidth; ++ix)
+		if (m_hstBinStart[i] == -1)
 		{
-			float binMinX = ix * binLen;
-			float binMinY = iy * binLen;
+			m_hstBinStart[i] = end;
+		}
+		else
+		{
+			end = m_hstBinStart[i];
+		}
 
-			//form the predicate
-			kernelFormPredicate<<<gridDim, blockDim>>>(m_devicePredicate, binMinX, binMinY, binLen);
-
-			//scan the predicate to get the position
-			prefixSum(m_devicePredicate, m_deviceOffset, numCircles);
-			
-			//intialize the bin and compact the original data into bins
-			bins.addBin(ix, iy, cudaDevicePosition, cudaDeviceColor, cudaDeviceRadius,
-						m_devicePredicate, m_deviceOffset, numCircles);
+		if (i == m_binWidth * m_binWidth - 1)
+		{
+			maxBinCirCnt = MAX2(maxBinCirCnt, bcPairLen - m_hstBinStart[i]);
+		}
+		else
+		{
+			maxBinCirCnt = MAX2(maxBinCirCnt, m_hstBinStart[i + 1] - m_hstBinStart[i]);
 		}
 	}
+	printf("maxBinCirCnt: %d \n", maxBinCirCnt);
+	cudaMemcpy(m_devBinStart, m_hstBinStart, sizeof(unsigned int) * m_binWidth * m_binWidth, cudaMemcpyHostToDevice);
 
-	/*2.Use the Bins to form the segmented data,
-	* each segment maps to a bin.
+
+	/*6. Draw the picture
 	*/
-	unsigned int	numBinCirs = bins.getNumBinCirs();; //Sum of all bin circles
-	unsigned int	maxBinCirs = bins.getMaxBinCirs();; //Max of all bin circles
+	dim3 pixelBlockDim(16, 16);
+	dim3 pixelGridDim ( (image->width  + pixelBlockDim.x - 1)  / pixelBlockDim.x,
+						(image->height + pixelBlockDim.x - 1)  / pixelBlockDim.y);
+	//unsigned int sharedMemSize = maxBinCirCnt * (sizeof(unsigned int))
 
-	unsigned int	*devSegOffset;
-	float			*devSegCen, *devSegCol, *devSegRad;
-	bins.getDevSegmentedOffset(devSegOffset);
-	bins.getDevSegCenColRad(devSegCen, devSegCol, devSegRad);
-	
+	unsigned int sharedMemSize = maxBinCirCnt * (sizeof(float) * 3 +
+												 sizeof(float));
 
-	/*3.Lauch the draw kernels
-	*/
-	dim3 drawBlockDim(16, 16);
-	dim3 drawGridDim( (image->width	 + drawBlockDim.x - 1) / drawBlockDim.x,
-					  (image->height + drawBlockDim.y - 1) / drawBlockDim.y);
-
-	unsigned int sharedMemSize = maxBinCirs * 
-								(
-								sizeof(float) * 3 + //center
-								sizeof(float) * 3 + //color
-								sizeof(float)		//radius 
-								);
-
-	kernelRenderCircles<<<drawGridDim, drawBlockDim, sharedMemSize>>>(	devSegOffset,
-																		devSegCen,
-																		devSegCol,
-																		devSegRad,
-																		numBinCirs,
-																		maxBinCirs,
-																		binWidth
-																		);
-	
+	kernelRenderCircles_1 <<<pixelGridDim, pixelBlockDim, sharedMemSize >>> (	devBinCirPairCir, 
+																				m_devBinStart,
+																				m_binWidth,
+																				bcPairLen,
+																				maxBinCirCnt);
 	cudaCheckError(cudaDeviceSynchronize());
+	cudaFree(devBinCirPairBin);
+	cudaFree(devBinCirPairCir);
 }

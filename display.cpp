@@ -45,7 +45,7 @@ void startRendererWithDisplay(Renderer* renderer)
 	}
 
 	window = glfwCreateWindow(gDisplay.width, gDisplay.height, 
-							  "CUDA Circle Renderer", NULL, NULL);
+							  "Alianpaul CUDA Circle Renderer", NULL, NULL);
 
 	glfwMakeContextCurrent(window);
 	glfwSwapInterval(1);

@@ -6,7 +6,7 @@
 #include "helper.cuh"
 
 __global__ void preScan(unsigned int* deviceInput, unsigned int* deviceOutput, int cnt,
-						unsigned int* deviceSum, bool isSum)
+						unsigned int* deviceSum)
 {
 	extern __shared__ unsigned int temp[];
 	int cntInB = blockDim.x * 2;
@@ -39,17 +39,14 @@ __global__ void preScan(unsigned int* deviceInput, unsigned int* deviceOutput, i
 		offset *= 2;
 	}
 
+	__syncthreads();
 	//before clear the last element, move the last element to deviceSums.
 	if (threadIdx.x == 0)
 	{
-		if (isSum)
-		{
-			deviceSum[blockIdx.x] = temp[cntInB - 1];
-		}
+		deviceSum[blockIdx.x] = temp[cntInB - 1];
 		temp[cntInB - 1] = 0;
 	}
 	
-
 	//downsweep
 	for (int d = 1; d < cntInB; d *=2)
 	{
@@ -67,7 +64,6 @@ __global__ void preScan(unsigned int* deviceInput, unsigned int* deviceOutput, i
 		}
 	}
 
-	__syncthreads();
 	if (idxInG < cnt)
 	{
 		deviceOutput[idxInG] = temp[idxInB];
@@ -82,13 +78,16 @@ __global__ void preScan(unsigned int* deviceInput, unsigned int* deviceOutput, i
 __global__ void addInc(unsigned int* deviceInput, unsigned int* deviceOutput, int eleCnt,
 					   unsigned int* deviceInc)
 {
+	/*
 	__shared__ int inc;
 	if (threadIdx.x == 0)
 	{
 		inc = deviceInc[blockIdx.x];
 	}
 	__syncthreads();
-
+	*/
+	int inc = deviceInc[blockIdx.x];
+	
 	int cntInB = blockDim.x * 2;
 	int idxInG = blockIdx.x * cntInB + threadIdx.x;
 
@@ -108,8 +107,10 @@ __global__ void addInc(unsigned int* deviceInput, unsigned int* deviceOutput, in
 /*input:	allocated and initialized device memory
 * output:	allocated device memory
 * cnt:		size
+*
+* return the sum of all element;
 */
-void prefixSum(unsigned int* deviceInput, unsigned int* deviceOutput, int eleCnt)
+unsigned int prefixSum(unsigned int* deviceInput, unsigned int* deviceOutput, int eleCnt)
 {
 
 	/*Test:	
@@ -129,7 +130,7 @@ void prefixSum(unsigned int* deviceInput, unsigned int* deviceOutput, int eleCnt
 	*/
 
 	dim3 blockDim(256);
-	int eleCntInB = blockDim.x * 2;
+	int	 eleCntInB = blockDim.x * 2;
 	unsigned int sharedMemSize = eleCntInB * sizeof(unsigned int);
 
 	dim3 gridDim((eleCnt+ eleCntInB - 1) / eleCntInB);
@@ -139,11 +140,13 @@ void prefixSum(unsigned int* deviceInput, unsigned int* deviceOutput, int eleCnt
 	cudaMalloc(&deviceSum, sizeof(unsigned int)*blockCnt);
 	unsigned int* deviceInc;
 	cudaMalloc(&deviceInc, sizeof(unsigned int)*blockCnt);
+	unsigned int* deviceTotalSum;
+	cudaMalloc(&deviceTotalSum, sizeof(unsigned int));
 
 	preScan<<<gridDim, blockDim, sharedMemSize>>>(deviceInput, deviceOutput, eleCnt,
-												  deviceSum, true);
+												  deviceSum);
 	preScan<<<1, blockDim, sharedMemSize>>>(deviceSum, deviceInc, blockCnt,
-											0, false);
+											deviceTotalSum);
 	addInc<<<gridDim, blockDim>>>(deviceOutput, deviceOutput, eleCnt,
 								  deviceInc);
 	
@@ -156,6 +159,13 @@ void prefixSum(unsigned int* deviceInput, unsigned int* deviceOutput, int eleCnt
 		printf("%d ", hostScanOut[i]);
 	}
 	*/
+
+	unsigned int hostTotalSum; 
+	cudaMemcpy(&hostTotalSum, deviceTotalSum, sizeof(unsigned int), cudaMemcpyDeviceToHost);
+
 	cudaFree(deviceInc);
 	cudaFree(deviceSum);
+	cudaFree(deviceTotalSum);
+
+	return hostTotalSum;
 }
